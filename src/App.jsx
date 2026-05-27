@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import * as XLSX from 'xlsx';
 
+const EMPTY_ITEM = { itemName: '', mtr: '', grnNo: '', grnComplete: false };
+
 const INITIAL_FORM = {
   date: new Date().toISOString().split('T')[0],
   partyName: '',
@@ -9,10 +11,7 @@ const INITIAL_FORM = {
   paymentMode: '',
   pendencyNumber: '',
   pendencyClosed: false,
-  itemName: '',
-  mtr: '',
-  grnNo: '',
-  grnComplete: false,
+  items: [{ ...EMPTY_ITEM }],
   discountEnabled: false,
   discountPercent: '',
   chargesEnabled: false,
@@ -26,7 +25,10 @@ const INITIAL_FORM = {
 };
 
 export default function App() {
-  const [form, setForm] = useState({ ...INITIAL_FORM, date: new Date().toISOString().split('T')[0] });
+  const [form, setForm] = useState(() => ({
+    ...INITIAL_FORM,
+    date: new Date().toISOString().split('T')[0],
+  }));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [records, setRecords] = useState([]);
@@ -37,6 +39,8 @@ export default function App() {
   // ---- SEARCH STATE ----
   const [searchText, setSearchText] = useState('');
   const [searchStatus, setSearchStatus] = useState('');
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [cloudDownloading, setCloudDownloading] = useState(false);
 
   useEffect(() => {
     fetchRecords();
@@ -45,7 +49,7 @@ export default function App() {
   async function fetchRecords(searchTxt = '', searchSt = '') {
     let query = supabase
       .from('dispatch_entries')
-      .select('*')
+      .select('*, dispatch_items(*)')
       .order('created_at', { ascending: false })
       .limit(200);
 
@@ -64,14 +68,50 @@ export default function App() {
     setForm(prev => ({ ...prev, [field]: value }));
   }
 
+  // ---- ITEM HELPERS ----
+  function updateItem(index, field, value) {
+    setForm(prev => {
+      const items = [...prev.items];
+      items[index] = { ...items[index], [field]: value };
+      return { ...prev, items };
+    });
+  }
+
+  function addItem() {
+    setForm(prev => {
+      if (prev.items.length >= 5) return prev; // max 5 items
+      return { ...prev, items: [...prev.items, { ...EMPTY_ITEM }] };
+    });
+  }
+
+  function removeItem(index) {
+    setForm(prev => {
+      if (prev.items.length <= 1) return prev; // keep at least 1
+      const items = prev.items.filter((_, i) => i !== index);
+      return { ...prev, items };
+    });
+  }
+
   function clearForm() {
-    setForm({ ...INITIAL_FORM, date: new Date().toISOString().split('T')[0] });
+    setForm({
+      ...INITIAL_FORM,
+      date: new Date().toISOString().split('T')[0],
+    });
     setEditingId(null);
     setMessage(null);
   }
 
   // ---- LOAD RECORD INTO FORM FOR EDITING ----
   function editRecord(record) {
+    const items = (record.dispatch_items && record.dispatch_items.length > 0)
+      ? record.dispatch_items.map(it => ({
+          itemName: it.item_name || '',
+          mtr: it.mtr || '',
+          grnNo: it.grn_no || '',
+          grnComplete: it.grn_complete || false,
+        }))
+      : [{ ...EMPTY_ITEM }];
+
     setForm({
       date: record.date,
       partyName: record.party_name || '',
@@ -79,10 +119,7 @@ export default function App() {
       paymentMode: record.payment_mode || '',
       pendencyNumber: record.pendency_number || '',
       pendencyClosed: record.pendency_closed || false,
-      itemName: record.item_name || '',
-      mtr: record.mtr || '',
-      grnNo: record.grn_no || '',
-      grnComplete: record.grn_complete || false,
+      items,
       discountEnabled: record.discount_enabled || false,
       discountPercent: record.discount_percent != null ? String(record.discount_percent) : '',
       chargesEnabled: record.charges_enabled || false,
@@ -103,6 +140,7 @@ export default function App() {
   async function deleteRecord(id) {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
     setDeleting(id);
+    // Items cascade-delete thanks to ON DELETE CASCADE FK
     const { error } = await supabase.from('dispatch_entries').delete().eq('id', id);
     if (error) {
       setMessage({ type: 'error', text: 'Delete failed: ' + error.message });
@@ -110,6 +148,7 @@ export default function App() {
       setMessage({ type: 'success', text: 'Record deleted successfully!' });
       if (editingId === id) clearForm();
       fetchRecords(searchText, searchStatus);
+      syncAllToCloud();
     }
     setDeleting(null);
   }
@@ -131,10 +170,6 @@ export default function App() {
       payment_mode: form.paymentMode,
       pendency_number: form.pendencyNumber.trim() || null,
       pendency_closed: form.pendencyClosed,
-      item_name: form.itemName.trim(),
-      mtr: form.mtr.trim(),
-      grn_no: form.grnNo.trim(),
-      grn_complete: form.grnComplete,
       discount_enabled: form.discountEnabled,
       discount_percent: form.discountEnabled ? Number(form.discountPercent) || 0 : null,
       charges_enabled: form.chargesEnabled,
@@ -149,23 +184,53 @@ export default function App() {
     };
 
     let error;
+    let entryId = editingId;
+
     if (editingId) {
       // UPDATE existing record
       const res = await supabase.from('dispatch_entries').update(payload).eq('id', editingId);
       error = res.error;
+      if (!error) {
+        // Delete old items, then re-insert
+        await supabase.from('dispatch_items').delete().eq('entry_id', editingId);
+      }
     } else {
       // INSERT new record
-      const res = await supabase.from('dispatch_entries').insert([payload]);
+      const res = await supabase.from('dispatch_entries').insert([payload]).select('id').single();
       error = res.error;
+      if (!error && res.data) {
+        entryId = res.data.id;
+      }
     }
 
     if (error) {
       setMessage({ type: 'error', text: 'Save failed: ' + error.message });
-    } else {
-      setMessage({ type: 'success', text: editingId ? 'Record updated successfully!' : 'Dispatch saved successfully!' });
-      clearForm();
-      fetchRecords(searchText, searchStatus);
+      setSaving(false);
+      return;
     }
+
+    // Insert items
+    const validItems = form.items.filter(it => it.itemName.trim() !== '');
+    if (validItems.length > 0 && entryId) {
+      const itemRows = validItems.map(it => ({
+        entry_id: entryId,
+        item_name: it.itemName.trim(),
+        mtr: it.mtr.trim(),
+        grn_no: it.grnNo.trim(),
+        grn_complete: it.grnComplete,
+      }));
+      const { error: itemErr } = await supabase.from('dispatch_items').insert(itemRows);
+      if (itemErr) {
+        setMessage({ type: 'error', text: 'Items save failed: ' + itemErr.message });
+        setSaving(false);
+        return;
+      }
+    }
+
+    setMessage({ type: 'success', text: editingId ? 'Record updated successfully!' : 'Dispatch saved successfully!' });
+    clearForm();
+    fetchRecords(searchText, searchStatus);
+    syncAllToCloud();
 
     setSaving(false);
   }
@@ -190,34 +255,37 @@ export default function App() {
 
     const yn = (val) => (val ? 'YES' : 'NO');
 
-    const rows = records.map((r) => ({
-      'Date': r.date || '',
-      'Party Name': r.party_name || '',
-      'RM': r.rm || '',
-      'Payment Mode': r.payment_mode || '',
-      'Pendency No': r.pendency_number != null ? r.pendency_number : '',
-      'Pendency Closed': yn(r.pendency_closed),
-      'Item Name': r.item_name || '',
-      'MTR': r.mtr || '',
-      'GRN No': r.grn_no || '',
-      'GRN Complete': yn(r.grn_complete),
-      'Discount': yn(r.discount_enabled),
-      'Discount %': r.discount_enabled ? (r.discount_percent != null ? r.discount_percent + '%' : '0%') : '',
-      'Charges': yn(r.charges_enabled),
-      'Charge Name': r.charges_enabled ? (r.charges_name || '') : '',
-      'Dispatch Via': r.dispatch_via || '',
-      'Bill No': r.bill_no || '',
-      'Bilty No': r.bilty_no || '',
-      'Bilty WhatsApp': yn(r.bilty_whatsapp),
-      'Bilty Website': yn(r.bilty_website),
-      'Dispatch Done': yn(r.dispatch_done),
-      'Status': r.status || 'PENDING',
-    }));
+    const rows = records.map((r) => {
+      const items = r.dispatch_items || [];
+      return {
+        'Date': r.date || '',
+        'Party Name': r.party_name || '',
+        'RM': r.rm || '',
+        'Payment Mode': r.payment_mode || '',
+        'Pendency No': r.pendency_number != null ? r.pendency_number : '',
+        'Pendency Closed': yn(r.pendency_closed),
+        'Items': items.map(it => it.item_name || '').filter(Boolean).join(', ') || '',
+        'MTR': items.map(it => it.mtr || '').filter(Boolean).join(', ') || '',
+        'GRN No': items.map(it => it.grn_no || '').filter(Boolean).join(', ') || '',
+        'GRN Complete': items.map(it => yn(it.grn_complete)).join(', ') || '',
+        'Discount': yn(r.discount_enabled),
+        'Discount %': r.discount_enabled ? (r.discount_percent != null ? r.discount_percent + '%' : '0%') : '',
+        'Charges': yn(r.charges_enabled),
+        'Charge Name': r.charges_enabled ? (r.charges_name || '') : '',
+        'Dispatch Via': r.dispatch_via || '',
+        'Bill No': r.bill_no || '',
+        'Bilty No': r.bilty_no || '',
+        'Bilty WhatsApp': yn(r.bilty_whatsapp),
+        'Bilty Website': yn(r.bilty_website),
+        'Dispatch Done': yn(r.dispatch_done),
+        'Status': r.status || 'PENDING',
+      };
+    });
 
     const headers = [
       'Date', 'Party Name', 'RM', 'Payment Mode',
       'Pendency No', 'Pendency Closed',
-      'Item Name', 'MTR', 'GRN No', 'GRN Complete',
+      'Items', 'MTR', 'GRN No', 'GRN Complete',
       'Discount', 'Discount %', 'Charges', 'Charge Name',
       'Dispatch Via', 'Bill No', 'Bilty No',
       'Bilty WhatsApp', 'Bilty Website',
@@ -236,6 +304,110 @@ export default function App() {
     XLSX.writeFile(wb, fileName);
 
     setMessage({ type: 'success', text: `Exported ${records.length} records to ${fileName}` });
+  }
+
+  // ---- CLOUD SYNC: Upload Excel to Supabase Storage ----
+  async function uploadToCloud(recordsToUpload) {
+    if (!recordsToUpload || recordsToUpload.length === 0) return;
+
+    const yn = (val) => (val ? 'YES' : 'NO');
+    const rows = recordsToUpload.map((r) => {
+      const items = r.dispatch_items || [];
+      return {
+        'Date': r.date || '',
+        'Party Name': r.party_name || '',
+        'RM': r.rm || '',
+        'Payment Mode': r.payment_mode || '',
+        'Pendency No': r.pendency_number != null ? r.pendency_number : '',
+        'Pendency Closed': yn(r.pendency_closed),
+        'Items': items.map(it => it.item_name || '').filter(Boolean).join(', ') || '',
+        'MTR': items.map(it => it.mtr || '').filter(Boolean).join(', ') || '',
+        'GRN No': items.map(it => it.grn_no || '').filter(Boolean).join(', ') || '',
+        'GRN Complete': items.map(it => yn(it.grn_complete)).join(', ') || '',
+        'Discount': yn(r.discount_enabled),
+        'Discount %': r.discount_enabled ? (r.discount_percent != null ? r.discount_percent + '%' : '0%') : '',
+        'Charges': yn(r.charges_enabled),
+        'Charge Name': r.charges_enabled ? (r.charges_name || '') : '',
+        'Dispatch Via': r.dispatch_via || '',
+        'Bill No': r.bill_no || '',
+        'Bilty No': r.bilty_no || '',
+        'Bilty WhatsApp': yn(r.bilty_whatsapp),
+        'Bilty Website': yn(r.bilty_website),
+        'Dispatch Done': yn(r.dispatch_done),
+        'Status': r.status || 'PENDING',
+      };
+    });
+
+    const headers = [
+      'Date', 'Party Name', 'RM', 'Payment Mode',
+      'Pendency No', 'Pendency Closed',
+      'Items', 'MTR', 'GRN No', 'GRN Complete',
+      'Discount', 'Discount %', 'Charges', 'Charge Name',
+      'Dispatch Via', 'Bill No', 'Bilty No',
+      'Bilty WhatsApp', 'Bilty Website',
+      'Dispatch Done', 'Status',
+    ];
+
+    const ws = XLSX.utils.json_to_sheet(rows, { header: headers });
+    ws['!cols'] = headers.map((h) => ({ wch: Math.max(h.length + 4, 14) }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Dispatch Data');
+    const wbData = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+
+    const { error } = await supabase.storage
+      .from('dispatch-data')
+      .upload('Dispatch_Data_Latest.xlsx', wbData, {
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        upsert: true,
+        cacheControl: '0',
+      });
+
+    if (error) {
+      console.warn('☁️ Cloud auto-sync warning:', error.message);
+    }
+  }
+
+  // Fetch ALL records with items and upload to cloud
+  async function syncAllToCloud() {
+    setCloudSyncing(true);
+    const { data, error } = await supabase
+      .from('dispatch_entries')
+      .select('*, dispatch_items(*)')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (!error && data) {
+      await uploadToCloud(data);
+    }
+    setCloudSyncing(false);
+  }
+
+  // Download latest Excel from cloud
+  async function downloadFromCloud() {
+    setCloudDownloading(true);
+    const { data, error } = await supabase.storage
+      .from('dispatch-data')
+      .download('Dispatch_Data_Latest.xlsx');
+
+    if (error) {
+      setMessage({ type: 'error', text: 'No cloud file found yet. Save a record first!' });
+      setCloudDownloading(false);
+      return;
+    }
+
+    // Trigger browser download
+    const url = URL.createObjectURL(data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Dispatch_Data_Latest_${new Date().toISOString().split('T')[0]}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setMessage({ type: 'success', text: '☁️ Downloaded latest spreadsheet from cloud!' });
+    setCloudDownloading(false);
   }
 
   const statusBadge = (status) => (
@@ -342,48 +514,81 @@ export default function App() {
           </div>
         </fieldset>
 
-        {/* ---- 4. ITEM DETAILS ---- */}
+        {/* ---- 4. ITEM DETAILS (MULTI-ITEM) ---- */}
         <fieldset className="fieldset">
           <legend>📋 Item Details</legend>
-          <div className="grid-3">
-            <div>
-              <label className="label">Item Name</label>
-              <input
-                type="text"
-                placeholder="Enter item name"
-                value={form.itemName}
-                onChange={e => update('itemName', e.target.value)}
-                className="input"
-              />
+
+          {form.items.map((item, idx) => (
+            <div key={idx} className="item-row">
+              <div className="item-row-header">
+                <span className="item-number">Item #{idx + 1}</span>
+                {form.items.length > 1 && (
+                  <button
+                    type="button"
+                    className="btn-item-remove"
+                    onClick={() => removeItem(idx)}
+                    title="Remove this item"
+                  >
+                    ✖
+                  </button>
+                )}
+              </div>
+              <div className="grid-3">
+                <div>
+                  <label className="label">Item Name</label>
+                  <input
+                    type="text"
+                    placeholder="Enter item name"
+                    value={item.itemName}
+                    onChange={e => updateItem(idx, 'itemName', e.target.value)}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">MTR</label>
+                  <input
+                    type="text"
+                    placeholder="Enter MTR"
+                    value={item.mtr}
+                    onChange={e => updateItem(idx, 'mtr', e.target.value)}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">GRN No</label>
+                  <input
+                    type="text"
+                    placeholder="Enter GRN number"
+                    value={item.grnNo}
+                    onChange={e => updateItem(idx, 'grnNo', e.target.value)}
+                    className="input"
+                  />
+                  <label className="checkbox-label" style={{ marginTop: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={item.grnComplete}
+                      onChange={e => updateItem(idx, 'grnComplete', e.target.checked)}
+                    />
+                    <span className="check-text">{item.grnComplete ? '✅ GRN Complete' : '⬜ GRN Pending'}</span>
+                  </label>
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="label">MTR</label>
-              <input
-                type="text"
-                placeholder="Enter MTR"
-                value={form.mtr}
-                onChange={e => update('mtr', e.target.value)}
-                className="input"
-              />
-            </div>
-            <div>
-              <label className="label">GRN No</label>
-              <input
-                type="text"
-                placeholder="Enter GRN number"
-                value={form.grnNo}
-                onChange={e => update('grnNo', e.target.value)}
-                className="input"
-              />
-              <label className="checkbox-label" style={{ marginTop: 4 }}>
-                <input
-                  type="checkbox"
-                  checked={form.grnComplete}
-                  onChange={e => update('grnComplete', e.target.checked)}
-                />
-                <span className="check-text">{form.grnComplete ? '✅ GRN Complete' : '⬜ GRN Pending'}</span>
-              </label>
-            </div>
+          ))}
+
+          <div className="item-add-row">
+            <button
+              type="button"
+              className="btn-item-add"
+              onClick={addItem}
+              disabled={form.items.length >= 5}
+              title="Add another item (max 5)"
+            >
+              ＋ Add Item
+            </button>
+            <span className="hint">
+              {form.items.length >= 5 ? '(Max 5 items reached)' : 'Click to add more items to this dispatch'}
+            </span>
           </div>
         </fieldset>
 
@@ -531,6 +736,7 @@ export default function App() {
           <button onClick={clearForm} disabled={saving} className="btn btn-clear">
             🗑️ Clear Form
           </button>
+          {cloudSyncing && <span className="cloud-indicator">☁️ Syncing to cloud...</span>}
           <button
             onClick={() => {
               setShowRecords(!showRecords);
@@ -577,8 +783,16 @@ export default function App() {
               </select>
               <button onClick={handleSearch} className="btn btn-search">🔍 Search</button>
               <button onClick={handleClearSearch} className="btn btn-search-clear">✖ Reset</button>
-              <button onClick={exportToExcel} className="btn btn-export" title="Export all filtered records to Excel (line-wise format)">
+              <button onClick={exportToExcel} className="btn btn-export" title="Download filtered records as Excel file">
                 📥 Export Excel
+              </button>
+              <button
+                onClick={downloadFromCloud}
+                disabled={cloudDownloading}
+                className="btn btn-cloud"
+                title="Download latest spreadsheet from cloud (auto-updated on every save/delete)"
+              >
+                {cloudDownloading ? '⏳ Downloading...' : '☁️ Download Latest'}
               </button>
             </div>
           </div>
@@ -594,7 +808,7 @@ export default function App() {
                     <th>Party</th>
                     <th>RM</th>
                     <th>Payment</th>
-                    <th>Item</th>
+                    <th>Items</th>
                     <th>GRN</th>
                     <th>Dispatch Via</th>
                     <th>Bill No</th>
@@ -607,40 +821,45 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {records.map(r => (
-                    <tr key={r.id} className={editingId === r.id ? 'row-editing' : ''}>
-                      <td>{r.date}</td>
-                      <td><strong>{r.party_name}</strong></td>
-                      <td>{r.rm}</td>
-                      <td>{r.payment_mode}</td>
-                      <td>{r.item_name}</td>
-                      <td>{r.grn_no} {tick(r.grn_complete)}</td>
-                      <td>{r.dispatch_via}</td>
-                      <td>{r.bill_no}</td>
-                      <td>{r.bilty_no}</td>
-                      <td>{tick(r.bilty_whatsapp)}</td>
-                      <td>{tick(r.bilty_website)}</td>
-                      <td>{statusBadge(r.status)}</td>
-                      <td>{r.pendency_number || '—'} {r.pendency_number ? tick(r.pendency_closed) : ''}</td>
-                      <td className="actions-cell">
-                        <button
-                          onClick={() => editRecord(r)}
-                          className="btn-sm btn-edit"
-                          title="Edit this record"
-                        >
-                          ✏️
-                        </button>
-                        <button
-                          onClick={() => deleteRecord(r.id)}
-                          disabled={deleting === r.id}
-                          className="btn-sm btn-delete"
-                          title="Delete this record"
-                        >
-                          {deleting === r.id ? '⏳' : '🗑️'}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {records.map(r => {
+                    const items = r.dispatch_items || [];
+                    const itemNames = items.map(it => it.item_name || '—').join(', ');
+                    const grnInfo = items.map(it => `${it.grn_no || '—'} ${tick(it.grn_complete)}`).join(', ');
+                    return (
+                      <tr key={r.id} className={editingId === r.id ? 'row-editing' : ''}>
+                        <td>{r.date}</td>
+                        <td><strong>{r.party_name}</strong></td>
+                        <td>{r.rm}</td>
+                        <td>{r.payment_mode}</td>
+                        <td title={itemNames}>{itemNames.length > 40 ? itemNames.slice(0, 40) + '...' : itemNames}</td>
+                        <td>{grnInfo}</td>
+                        <td>{r.dispatch_via}</td>
+                        <td>{r.bill_no}</td>
+                        <td>{r.bilty_no}</td>
+                        <td>{tick(r.bilty_whatsapp)}</td>
+                        <td>{tick(r.bilty_website)}</td>
+                        <td>{statusBadge(r.status)}</td>
+                        <td>{r.pendency_number || '—'} {r.pendency_number ? tick(r.pendency_closed) : ''}</td>
+                        <td className="actions-cell">
+                          <button
+                            onClick={() => editRecord(r)}
+                            className="btn-sm btn-edit"
+                            title="Edit this record"
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            onClick={() => deleteRecord(r.id)}
+                            disabled={deleting === r.id}
+                            className="btn-sm btn-delete"
+                            title="Delete this record"
+                          >
+                            {deleting === r.id ? '⏳' : '🗑️'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

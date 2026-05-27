@@ -105,5 +105,76 @@ CREATE TRIGGER trigger_dispatch_entries_updated_at
   EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================
--- DONE! Your dispatch_entries table is ready.
+-- 6. STORAGE BUCKET (for auto cloud sync of Excel file)
+-- ============================================================================
+-- Run this separately in your Supabase SQL Editor OR create the bucket via
+-- Supabase Dashboard -> Storage -> New Bucket:
+--   Bucket Name: dispatch-data
+--   Public bucket: YES  (so anyone can download)
+-- Then add Storage Policies below:
+-- ============================================================================
+
+-- Storage policy: Allow public SELECT (download)
+CREATE POLICY "Allow public download"
+  ON storage.objects
+  FOR SELECT
+  USING (bucket_id = 'dispatch-data');
+
+-- Storage policy: Allow public INSERT (upload)
+CREATE POLICY "Allow public upload"
+  ON storage.objects
+  FOR INSERT
+  WITH CHECK (bucket_id = 'dispatch-data');
+
+-- Storage policy: Allow public UPDATE (overwrite)
+CREATE POLICY "Allow public update"
+  ON storage.objects
+  FOR UPDATE
+  USING (bucket_id = 'dispatch-data')
+  WITH CHECK (bucket_id = 'dispatch-data');
+
+-- ============================================================================
+-- 7. DISPATCH ITEMS TABLE (Multi-Item Support)
+--    Each dispatch entry can have 1-3 items stored in this table.
+--    ON DELETE CASCADE ensures items are removed when entry is deleted.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS dispatch_items (
+  id              BIGSERIAL PRIMARY KEY,
+  entry_id        BIGINT NOT NULL REFERENCES dispatch_entries(id) ON DELETE CASCADE,
+  item_name       TEXT DEFAULT '',
+  mtr             TEXT DEFAULT '',
+  grn_no          TEXT DEFAULT '',
+  grn_complete    BOOLEAN DEFAULT FALSE,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- RLS for dispatch_items
+ALTER TABLE dispatch_items ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow SELECT for all items"
+  ON dispatch_items
+  FOR SELECT
+  USING (true);
+
+CREATE POLICY "Allow INSERT for all items"
+  ON dispatch_items
+  FOR INSERT
+  WITH CHECK (true);
+
+CREATE POLICY "Allow UPDATE for all items"
+  ON dispatch_items
+  FOR UPDATE
+  USING (true)
+  WITH CHECK (true);
+
+CREATE POLICY "Allow DELETE for all items"
+  ON dispatch_items
+  FOR DELETE
+  USING (true);
+
+-- Index on entry_id for fast JOINs
+CREATE INDEX IF NOT EXISTS idx_dispatch_items_entry_id ON dispatch_items (entry_id);
+
+-- ============================================================================
+-- DONE! Your dispatch_entries + dispatch_items tables + cloud storage are ready.
 -- ============================================================================
