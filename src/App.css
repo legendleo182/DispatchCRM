@@ -595,6 +595,19 @@ select.input {
   transform: none;
 }
 
+/* ============ REMARK SECTION ============ */
+.remark-section {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.remark-textarea {
+  resize: vertical;
+  min-height: 60px;
+  font-family: inherit;
+}
+
 /* ============ RESPONSIVE ============ */
 @media (max-width: 768px) {
   .grid-3,

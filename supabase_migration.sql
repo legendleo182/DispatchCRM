@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS dispatch_entries (
   -- Bilty Sharing
   bilty_whatsapp  BOOLEAN DEFAULT FALSE,
   bilty_website   BOOLEAN DEFAULT FALSE,
+
+  -- Remark
+  remark_enabled  BOOLEAN DEFAULT FALSE,
+  remark_text     TEXT DEFAULT NULL,
   
   -- Final Status
   dispatch_done   BOOLEAN DEFAULT FALSE,

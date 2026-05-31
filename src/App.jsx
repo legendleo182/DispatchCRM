@@ -21,6 +21,8 @@ const INITIAL_FORM = {
   biltyNo: '',
   biltyWhatsapp: false,
   biltyWebsite: false,
+  remarkEnabled: false,
+  remarkText: '',
   dispatchDone: false,
 };
 
@@ -129,6 +131,8 @@ export default function App() {
       biltyNo: record.bilty_no || '',
       biltyWhatsapp: record.bilty_whatsapp || false,
       biltyWebsite: record.bilty_website || false,
+      remarkEnabled: record.remark_enabled || false,
+      remarkText: record.remark_text || '',
       dispatchDone: record.dispatch_done || false,
     });
     setEditingId(record.id);
@@ -179,6 +183,8 @@ export default function App() {
       bilty_no: form.biltyNo.trim(),
       bilty_whatsapp: form.biltyWhatsapp,
       bilty_website: form.biltyWebsite,
+      remark_enabled: form.remarkEnabled,
+      remark_text: form.remarkEnabled ? form.remarkText.trim() : null,
       dispatch_done: form.dispatchDone,
       status: form.dispatchDone ? 'CLOSED' : 'PENDING',
     };
@@ -277,6 +283,7 @@ export default function App() {
         'Bilty No': r.bilty_no || '',
         'Bilty WhatsApp': yn(r.bilty_whatsapp),
         'Bilty Website': yn(r.bilty_website),
+        'Remark': r.remark_enabled ? (r.remark_text || '') : '',
         'Dispatch Done': yn(r.dispatch_done),
         'Status': r.status || 'PENDING',
       };
@@ -289,6 +296,7 @@ export default function App() {
       'Discount', 'Discount %', 'Charges', 'Charge Name',
       'Dispatch Via', 'Bill No', 'Bilty No',
       'Bilty WhatsApp', 'Bilty Website',
+      'Remark',
       'Dispatch Done', 'Status',
     ];
 
@@ -333,6 +341,7 @@ export default function App() {
         'Bilty No': r.bilty_no || '',
         'Bilty WhatsApp': yn(r.bilty_whatsapp),
         'Bilty Website': yn(r.bilty_website),
+        'Remark': r.remark_enabled ? (r.remark_text || '') : '',
         'Dispatch Done': yn(r.dispatch_done),
         'Status': r.status || 'PENDING',
       };
@@ -345,6 +354,7 @@ export default function App() {
       'Discount', 'Discount %', 'Charges', 'Charge Name',
       'Dispatch Via', 'Bill No', 'Bilty No',
       'Bilty WhatsApp', 'Bilty Website',
+      'Remark',
       'Dispatch Done', 'Status',
     ];
 
@@ -706,6 +716,27 @@ export default function App() {
               <span className="check-text">{form.biltyWebsite ? '✅ Bilty Uploaded on Website' : '⬜ Bilty Website'}</span>
             </label>
           </div>
+          <div className="remark-section">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.remarkEnabled}
+                onChange={e => update('remarkEnabled', e.target.checked)}
+              />
+              <span className="check-text"><strong>📝 Add Remark?</strong></span>
+            </label>
+            {form.remarkEnabled && (
+              <div className="mt-8">
+                <textarea
+                  placeholder="Enter your remark here..."
+                  value={form.remarkText}
+                  onChange={e => update('remarkText', e.target.value)}
+                  className="input remark-textarea"
+                  rows={3}
+                />
+              </div>
+            )}
+          </div>
         </fieldset>
 
         {/* ---- 8. DISPATCH DONE ---- */}
@@ -815,6 +846,7 @@ export default function App() {
                     <th>Bilty No</th>
                     <th>WA</th>
                     <th>Web</th>
+                    <th>Remark</th>
                     <th>Status</th>
                     <th>Pendency</th>
                     <th>Actions</th>
@@ -838,6 +870,7 @@ export default function App() {
                         <td>{r.bilty_no}</td>
                         <td>{tick(r.bilty_whatsapp)}</td>
                         <td>{tick(r.bilty_website)}</td>
+                        <td title={r.remark_text || ''}>{r.remark_enabled ? ((r.remark_text || '—').length > 30 ? (r.remark_text || '—').slice(0, 30) + '...' : (r.remark_text || '—')) : '—'}</td>
                         <td>{statusBadge(r.status)}</td>
                         <td>{r.pendency_number || '—'} {r.pendency_number ? tick(r.pendency_closed) : ''}</td>
                         <td className="actions-cell">
