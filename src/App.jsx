@@ -53,7 +53,7 @@ export default function App() {
       .from('dispatch_entries')
       .select('*, dispatch_items(*)')
       .order('created_at', { ascending: false })
-      .limit(200);
+      .limit(1000);
 
     if (searchTxt) {
       query = query.ilike('party_name', `%${searchTxt}%`);
